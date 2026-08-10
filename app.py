@@ -124,6 +124,19 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
+# 安全获取页面源码（CDP 模式刷新后可能页面未加载，兜底不崩）
+def safe_get_page_source(sb, default=""):
+    try:
+        handles = sb.driver.window_handles
+        if len(handles) > 1:
+            # CDP 模式下 sb.open() 可能开了新标签页，切回第一个
+            sb.driver.switch_to.window(handles[0])
+            time.sleep(1)
+        return sb.get_page_source()
+    except Exception as e:
+        print(f"⚠️ 获取页面源码失败: {e}")
+        return default
+
 # 等待Turnstile验证通过（通过弹窗内续期按钮是否出现来判定）
 def wait_for_turnstile_pass(sb, timeout=30):
     start = time.time()
@@ -137,7 +150,7 @@ def wait_for_turnstile_pass(sb, timeout=30):
         '.modal button:contains("Renew")',
     ]
     while time.time() - start < timeout:
-        page_lower = sb.get_page_source().lower()
+        page_lower = safe_get_page_source(sb).lower()
         # 先检查关键词是否消失（软判断）
         if not any(x in page_lower for x in cf_indicators):
             # 硬判断：按钮必须"可点击（未禁用）"，说明 Turnstile 真正通过
@@ -448,7 +461,7 @@ def main():
 
         # 提取当前到期日期
         sb.sleep(2)
-        page_source = sb.get_page_source()
+        page_source = safe_get_page_source(sb)
         current_expiry = extract_expiry_date(page_source)
         if current_expiry:
             print(f"📅 当前到期日期: {current_expiry}")
@@ -600,7 +613,7 @@ def main():
                 pass
 
             # 提取新的到期日期和倒计时
-            new_page_text = sb.get_page_source()
+            new_page_text = safe_get_page_source(sb)
             new_expiry = extract_expiry_date(new_page_text)
             new_match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", new_page_text)
 
@@ -639,7 +652,7 @@ def main():
                     sb.sleep(5)
                 except Exception:
                     pass
-                retry_text = sb.get_page_source()
+                retry_text = safe_get_page_source(sb)
                 retry_expiry = extract_expiry_date(retry_text)
                 retry_match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", retry_text)
                 if retry_match:
