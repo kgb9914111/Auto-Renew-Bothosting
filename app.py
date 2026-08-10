@@ -128,29 +128,29 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
 def wait_for_turnstile_pass(sb, timeout=30):
     start = time.time()
     cf_indicators = ["verify you are human", "确认您是真人", "troubleshoot", "just a moment"]
+    modal_selectors = [
+        'button:contains("Renew for 4 days")',
+        '[class*="modal"] button:contains("Renew for 4 days")',
+        '.modal button:contains("Renew for 4 days")',
+        'button:contains("Renew")',
+        '[class*="modal"] button:contains("Renew")',
+        '.modal button:contains("Renew")',
+    ]
     while time.time() - start < timeout:
         page_lower = sb.get_page_source().lower()
         # 先检查关键词是否消失（软判断）
         if not any(x in page_lower for x in cf_indicators):
-            # 再检查弹窗中的续期按钮是否可点击（硬判断）
+            # 硬判断：按钮必须"可点击（未禁用）"，说明 Turnstile 真正通过
             try:
-                # 尝试多种可能的续期按钮选择器
-                modal_selectors = [
-                    'button:contains("Renew for 4 days")',
-                    'button:contains("Renew")',
-                    '[class*="modal"] button:contains("Renew")',
-                    '.modal button:contains("Renew")',
-                ]
                 for sel in modal_selectors:
-                    if sb.is_element_visible(sel):
+                    if sb.is_element_enabled(sel):
                         btn_text = sb.get_text(sel)
-                        print(f"✅ Turnstile 验证已通过（弹窗按钮 '{btn_text}' 可见）")
+                        print(f"✅ Turnstile 验证已通过（弹窗按钮 '{btn_text}' 已启用可点击）")
                         return True
             except Exception:
                 pass
-            # 即使没找到按钮，但关键词已消失，也算通过
-            print("✅ Turnstile 验证已通过（关键词已消失）")
-            return True
+            # 关键词消失但按钮仍禁用 => Turnstile 未真正通过，继续等待
+            print("⚠️ 关键词已消失，但续期按钮仍不可点击（Turnstile 可能未真正通过），继续等待...")
         sb.sleep(1)
     print("❌ Turnstile 验证超时未通过")
     return False
@@ -494,21 +494,28 @@ def main():
                 send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                 return
 
-            # 处理弹窗中的 Turnstile
+            # 处理弹窗中的 Cloudflare Turnstile
             print("🔒 检测弹窗中的 Turnstile 验证...")
             turnstile_passed = False
             for attempt in range(1, 4):
                 try:
-                    sb.uc_gui_click_captcha()
-                    time.sleep(12)
+                    print(f"🔄 第 {attempt} 次尝试处理 Turnstile（使用 uc_gui_handle_cf）...")
+                    sb.uc_gui_handle_cf()
+                    time.sleep(10)
                 except Exception as e:
-                    print(f"⚠️ 点击 Turnstile 出错: {e}")
+                    print(f"⚠️ uc_gui_handle_cf 出错: {e}")
+                    # 兜底：用老的 click_captcha 再试一次
+                    try:
+                        sb.uc_gui_click_captcha()
+                        time.sleep(10)
+                    except Exception as e2:
+                        print(f"⚠️ 兜底 click_captcha 也出错: {e2}")
 
-                if wait_for_turnstile_pass(sb, timeout=20):
+                if wait_for_turnstile_pass(sb, timeout=25):
                     turnstile_passed = True
                     break
                 else:
-                    print(f"⏳ 第 {attempt} 次未通过，重试点击...")
+                    print(f"⏳ 第 {attempt} 次 Turnstile 未通过，重试...")
 
             if not turnstile_passed:
                 print("❌ Turnstile 验证最终未通过，脚本退出")
@@ -516,27 +523,70 @@ def main():
                 return
 
             # 点击续期按钮（多选择器兜底，避免点错位置）
-            print("⏳ 等待续期按钮可用并点击...")
-            time.sleep(5)
-
-            modal_button_clicked = False
+            print("⏳ 等待续期按钮启用并点击...")
             renew_selectors = [
                 'button:contains("Renew for 4 days")',
+                '[class*="modal"] button:contains("Renew for 4 days")',
+                '.modal button:contains("Renew for 4 days")',
                 'button:contains("Renew")',
                 '[class*="modal"] button:contains("Renew")',
                 '.modal button:contains("Renew")',
             ]
-            for sel in renew_selectors:
-                try:
-                    if sb.is_element_visible(sel):
-                        sb.click(sel, timeout=8)
-                        modal_button_clicked = True
-                        print(f"✅ 已点击续期按钮: {sb.get_text(sel)}")
+
+            modal_button_clicked = False
+            # 等待按钮真正启用（最多 20 秒）
+            for _ in range(20):
+                for sel in renew_selectors:
+                    try:
+                        if sb.is_element_enabled(sel):
+                            modal_button_clicked = True
+                            break
+                    except Exception:
+                        pass
+                if modal_button_clicked:
+                    break
+                sb.sleep(1)
+
+            if modal_button_clicked:
+                # 点击已启用的续期按钮
+                for sel in renew_selectors:
+                    try:
+                        if sb.is_element_enabled(sel):
+                            sb.click(sel, timeout=8)
+                            print(f"✅ 已点击续期按钮: {sb.get_text(sel)}")
+                            break
+                    except Exception as e:
+                        print(f"续期按钮点击失败({sel}): {e}")
+            else:
+                print("⚠️ 续期按钮始终不可点击（Turnstile 可能未通过），尝试再次处理验证码...")
+                # 兜底：再次处理 Turnstile 验证码
+                for attempt in range(1, 4):
+                    try:
+                        sb.uc_gui_handle_cf()
+                        time.sleep(10)
+                    except Exception as e:
+                        print(f"⚠️ 再次处理 Turnstile 出错: {e}")
+                        try:
+                            sb.uc_gui_click_captcha()
+                            time.sleep(10)
+                        except Exception as e2:
+                            print(f"⚠️ 兜底 click_captcha 也出错: {e2}")
+                    if wait_for_turnstile_pass(sb, timeout=20):
                         break
-                except Exception as e:
-                    print(f"续期按钮点击失败({sel}): {e}")
-            if not modal_button_clicked:
-                print("⚠️ 未找到可点击的续期按钮")
+                # 再确认一次按钮是否可点击
+                for sel in renew_selectors:
+                    try:
+                        if sb.is_element_enabled(sel):
+                            sb.click(sel, timeout=8)
+                            modal_button_clicked = True
+                            print(f"✅ 已点击续期按钮: {sb.get_text(sel)}")
+                            break
+                    except Exception as e:
+                        print(f"续期按钮点击失败({sel}): {e}")
+                if not modal_button_clicked:
+                    print("❌ 多次尝试后续期按钮仍不可点击，脚本退出")
+                    send_telegram_message(format_notification("❌ 续期失败", error="续期按钮始终不可点击（Turnstile 未通过）"))
+                    return
 
             # 等待续期生效：加长等待 + 刷新页面重新提取
             print("⏳ 等待新的过期时间...")
